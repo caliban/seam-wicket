@@ -28,7 +28,7 @@
 
    <artifactId>seam-wicket</artifactId>
    <packaging>jar</packaging>
-
+   <version>3.0.1.1-SNAPSHOT</version>
    <name>Seam for Apache Wicket Module Implementation</name>
    <url>${project.parent.url}</url>
 
@@ -60,6 +60,17 @@
          <artifactId>weld-core</artifactId>
          <scope>provided</scope>
       </dependency>
+      <dependency>
+         <groupId>org.apache.wicket</groupId>
+         <artifactId>wicket-ioc</artifactId>
+         <version>1.4.15</version>
+      </dependency>
+      <dependency>
+    <groupId>javax</groupId>
+    <artifactId>javaee-web-api</artifactId>
+    <version>6.0</version>
+    <scope>provided</scope>
+  </dependency>
    </dependencies>
 
    <build>
