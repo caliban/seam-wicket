@@ -31,7 +31,6 @@ import org.jboss.seam.wicket.util.NonContextual;
  */
 public abstract class SeamApplication extends WebApplication {
 
-    private NonContextual<SeamComponentInstantiationListener> seamComponentInstantiationListener;
     private NonContextual<SeamWebRequestCycleProcessor> seamWebRequestCycleProcessor;
 
     /**
@@ -48,9 +47,8 @@ public abstract class SeamApplication extends WebApplication {
     protected void internalInit() {
         super.internalInit();
         BeanManager manager = new BeanManagerLocator().getBeanManager();
-        this.seamComponentInstantiationListener = NonContextual.of(SeamComponentInstantiationListener.class, manager);
         this.seamWebRequestCycleProcessor = NonContextual.of(getWebRequestCycleProcessorClass(), manager);
-        addComponentInstantiationListener(seamComponentInstantiationListener.newInstance().produce().inject().get());
+        addComponentInstantiationListener(new SeamComponentInstantiationListener());
     }
 
     protected Class<? extends SeamWebRequestCycleProcessor>
