@@ -9,16 +9,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import javax.ejb.Local;
-import javax.ejb.Remote;
-import javax.ejb.Stateful;
-import javax.ejb.Stateless;
 import javax.enterprise.inject.spi.BeanManager;
-import javax.inject.Inject;
+import org.apache.wicket.WicketRuntimeException;
+import org.apache.wicket.injection.ConfigurableInjector;
+import org.apache.wicket.injection.IFieldValueFactory;
 import org.apache.wicket.proxy.IProxyTargetLocator;
-import org.apache.wicket.proxy.LazyInitProxyFactory;
+import org.apache.wicket.util.collections.ClassMetaCache;
 import org.jboss.seam.solder.beanManager.BeanManagerLocator;
-import org.jboss.seam.wicket.ProxyTargetLocator;
+import org.jboss.seam.wicket.SeamWicketFieldValueFactory;
 import org.jboss.seam.wicket.util.NonContextual;
 
 /**
@@ -28,101 +26,130 @@ import org.jboss.seam.wicket.util.NonContextual;
  * object, the first may be the one from the server (glassfish for example) the second is from
  * weld. the reason for this proxy is, wicket requires that all member of a component must be
  * serializable, and the glassfish proxy isn't. 
+ * TODO wicket ioc enhancement 
  * @author pengt
  */
-public final class SeamWicketInjector {
+public final class SeamWicketInjector extends ConfigurableInjector {
 
     private static final Logger LOGGER = Logger.getLogger(SeamWicketInjector.class.getName());
-    
+    private static final Field[] EMPTY_FIELDS = new Field[0];
+    private final ClassMetaCache<Field[]> cache = new ClassMetaCache<Field[]>();
+
     /**
      * injects any injectable members into an object
      * @param component the object
      */
-    public void inject(Object component) {
-        
-         //The manager could be null in unit testing environments
-        
+    @Override
+    public Object inject(Object component) {
+
+        //The manager could be null in unit testing environments
+
         BeanManager manager = new BeanManagerLocator().getBeanManager();
+
         if (manager != null) {
+            LOGGER.log(Level.INFO, "inject for comp " + component.getClass());
             //first step, let the beanmanager inject the whole object
             NonContextual.of(component.getClass(), manager).existingInstance(component).inject();
-            //second, filter for injectable fields
-            Field[] fields = extractInjectableFields(component);
-            //third
-            fields = filterForEJB(fields);
+            //second; trigger the proxy replacement strategy
+            super.inject(component);
+            return component;
 
-            for (Field field : fields) {
+        } else {
+            throw new WicketRuntimeException("could not obtain the beanmanager");
+        }
+    }
 
-                //if we are here, the current field is a) injectable, b
-                try {
-                    //the crucial step, we weave an lazyinitproxy in beween.
-                    // the lazyinitproxy is misleading, in fact the injected value will be 
-                    //stored in a transien field, and any subsequent (de)serialization will 
-                    //result in a fresh injection of an target object
-                    Object proxy = LazyInitProxyFactory.createProxy(field.getType(), constructLocator(field.getType(), field.get(component)));
-                    field.setAccessible(true);
-                    field.set(component, proxy);
-                } catch (IllegalArgumentException ex) {
-                    LOGGER.log(Level.SEVERE, null, ex);
-                } catch (IllegalAccessException ex) {
-                    LOGGER.log(Level.SEVERE, null, ex);
+    /**
+     * c/p from wicket-ioc
+     * we cannot use the standard inject mechano from wicket ioc because it checks if 
+     * the field is null, if yes, it will inject a proxy, else the algorithm does nothing.
+     * but the core idea of this extension is to weave a proxylocator in a already injected 
+     * between the ejb and the component. so the object will hardly be null
+     * 
+     */
+    @Override
+    public Object inject(Object object, IFieldValueFactory factory) {
+        final Class<?> clazz = object.getClass();
+
+        Field[] fields = getFields(clazz, factory);
+
+        for (int i = 0; i < fields.length; i++) {
+            final Field field = fields[i];
+
+            if (!field.isAccessible()) {
+                field.setAccessible(true);
+            }
+            try {
+                //the field may be null (almost impossible)
+                //or it may have already an object. thats fine too
+
+                Object value = factory.getFieldValue(field, object);
+
+                if (value != null) {
+                    field.set(object, value);
+
+                }
+
+
+            } catch (IllegalArgumentException e) {
+                throw new RuntimeException("error while injecting object [" + object.toString()
+                        + "] of type [" + object.getClass().getName() + "]", e);
+            } catch (IllegalAccessException e) {
+                throw new RuntimeException("error while injecting object [" + object.toString()
+                        + "] of type [" + object.getClass().getName() + "]", e);
+            }
+        }
+
+        return object;
+    }
+
+    @Override
+    protected IFieldValueFactory getFieldValueFactory() {
+        return new SeamWicketFieldValueFactory();
+    }
+
+    /**
+     * caches results of {@link #getFields(Class, IFieldValueFactory)}
+     * c/p from wicket-ioc, no changes
+     * @param clazz
+     * @param factory
+     * @return cached results as returned by {@link #getFields(Class, IFieldValueFactory)}
+     */
+    private Field[] getFields(Class<?> clazz, IFieldValueFactory factory) {
+        Field[] fields = cache.get(clazz);
+
+        if (fields == null) {
+            fields = findFields(clazz, factory);
+
+            // write to cache
+            cache.put(clazz, fields);
+        }
+
+        return fields;
+    }
+
+    /**
+     * Returns an array of fields that can be injected using the given field value factory
+     * c/p from wicket-ioc, no changes
+     * @param clazz
+     * @param factory
+     * @return an array of fields that can be injected using the given field value factory
+     */
+    private Field[] findFields(Class<?> clazz, IFieldValueFactory factory) {
+        List<Field> matched = new ArrayList<Field>();
+
+        while (clazz != null && !isBoundaryClass(clazz)) {
+            Field[] fields = clazz.getDeclaredFields();
+            for (int i = 0; i < fields.length; i++) {
+                final Field field = fields[i];
+
+                if (factory.supportsField(field)) {
+                    matched.add(field);
                 }
             }
-
+            clazz = clazz.getSuperclass();
         }
-    }
 
-    /**
-     * look for injectable fields such as @ejb or @inject. @resource is omitted,
-     * because that can't shouldn't be an ejb
-     * @param comp the object with fields
-     * @return an array of fields matching this condition
-     */
-    private Field[] extractInjectableFields(Object comp) {
-        Class clazz = comp.getClass();
-        //get all declared fields
-        Field[] fields = clazz.getDeclaredFields();
-        //prepare return value
-        List<Field> retval = new ArrayList<Field>();
-        for (Field field : fields) {
-            //filter the fields for @inject or @ejb
-            if (field.getAnnotation(Inject.class) != null || field.getAnnotation(javax.ejb.EJB.class) != null) {
-                LOGGER.log(Level.INFO, "found " + field.toGenericString());
-                retval.add(field);
-            }
-        }
-        return retval.toArray(new Field[retval.size()]);
-
-    }
-
-    /**
-     * filter this field array for ejbs. the type class must have either @stateless, @remote, @statefull, @local
-     * TODO any more annotations supported?
-     * @param the fields found
-     * @return an array of fields matching this condition
-     */
-    private Field[] filterForEJB(Field[] fields) {
-        List<Field> retval = new ArrayList<Field>();
-        for (Field field : fields) {
-            field.setAccessible(true);
-            Class clazz = field.getType();
-            LOGGER.log(Level.INFO, "typeclass" + clazz.getCanonicalName());
-            //look for @stateless, @stateful, @remote or @local
-            if (clazz.getAnnotation(Stateless.class) != null || clazz.getAnnotation(Stateful.class) != null || clazz.getAnnotation(Local.class) != null
-                    || clazz.getAnnotation(Remote.class) != null) {
-                LOGGER.log(Level.INFO, "found class with " + clazz.getCanonicalName());
-                retval.add(field);
-            }
-        }
-        return retval.toArray(new Field[retval.size()]);
-    }
-
-    /**
-     * construct a new Proxytargetlocator
-     *
-     */
-    private IProxyTargetLocator constructLocator(final Class clazz, Object object) {
-        // TODO omit this method, it is obsolete
-        return new ProxyTargetLocator(clazz, object);
+        return matched.size() == 0 ? EMPTY_FIELDS : matched.toArray(new Field[matched.size()]);
     }
 }
